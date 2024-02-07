@@ -1,0 +1,223 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: DataSync configuration to pull data from local/remote Source S3 bucket to local Destination S3 bucket
+
+# https://aws.amazon.com/blogs/storage/how-to-use-aws-datasync-to-migrate-data-between-amazon-s3-buckets/
+
+# Deploy this CloudFormation in the account/region with destination S3 bucket
+# For remote Source bucket, first apply bucket policy (below) before this template is deployed - otherwise rSourceDataSyncLocationS3 will fail
+# This CloudFormation can be used for Source bucket in same or different account as Destination bucket
+
+Parameters:
+    pSourceBucketName:
+        Description: Source bucket name in remote/local account
+        Type: String
+        Default: SOURCE-BUCKET-NAME
+    pDestBucketName:
+        Description: Destination bucket name local to this account
+        Type: String
+        Default: DEST-BUCKET-NAME
+    pRetention:
+        Description: CloudWatch Log Group retention for DataSync logs
+        Type: Number
+        Default: 30
+
+Resources:
+    # -- Source --
+    rSourceRole:
+        Type: AWS::IAM::Role
+        Properties:
+            Path: /rasp/
+            # PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/adfs-g-rasp/admin
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                  - Effect: Allow
+                    Principal:
+                      Service: !Sub datasync.${AWS::URLSuffix}
+                    Action:
+                      - sts:AssumeRole
+            ManagedPolicyArns:
+                 - !Ref rSourcePolicy
+
+    rSourcePolicy:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            Path: /rasp/
+            Description: DataSync source S3 policy
+            PolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                - Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  Effect: Allow
+                  Resource: !Sub arn:${AWS::Partition}:s3:::${pSourceBucketName}
+                - Action:
+                  - s3:GetObject
+                  - s3:ListMultipartUploadParts
+                  - s3:GetObjectTagging
+                  Effect: Allow
+                  Resource: !Sub arn:${AWS::Partition}:s3:::${pSourceBucketName}/*
+
+    # -- Remote Source S3 bucket requires bucket policy (below) before
+    rSourceDataSyncLocationS3:
+        Type: AWS::DataSync::LocationS3
+        Properties:
+          S3BucketArn: !Sub arn:${AWS::Partition}:s3:::${pSourceBucketName}
+          S3Config:
+              BucketAccessRoleArn: !GetAtt rSourceRole.Arn
+
+    # -- Destination --
+    rDestBucketName:
+        DeletionPolicy: Retain
+        Type: AWS::S3::Bucket
+        Properties:
+            AccessControl: Private
+            BucketName: !Sub ${pDestBucketName}
+            BucketEncryption:
+              ServerSideEncryptionConfiguration:
+                  - ServerSideEncryptionByDefault:
+                      SSEAlgorithm: AES256 # aws:kms
+            VersioningConfiguration:
+              Status: Enabled
+
+    rDestRole:
+        Type: AWS::IAM::Role
+        Properties:
+            Path: /rasp/
+            # PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/adfs-g-rasp/admin
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                  - Effect: Allow
+                    Principal:
+                      Service: !Sub datasync.${AWS::URLSuffix}
+                    Action:
+                      - sts:AssumeRole
+            ManagedPolicyArns:
+                 - !Ref rDestPolicy
+
+    rDestPolicy:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            Path: /rasp/
+            Description: DataSync destination S3 policy
+            PolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                - Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  Effect: Allow
+                  Resource: !GetAtt rDestBucketName.Arn
+                - Action:
+                   - s3:AbortMultipartUpload
+                   - s3:DeleteObject
+                   - s3:GetObject
+                   - s3:ListMultipartUploadParts
+                   - s3:PutObjectTagging
+                   - s3:GetObjectTagging
+                   - s3:PutObject
+                  Effect: Allow
+                  Resource: !Join ["", [!GetAtt rDestBucketName.Arn, "/*"] ]
+
+    rDestDataSyncLocationS3:
+        Type: AWS::DataSync::LocationS3
+        Properties:
+          S3BucketArn: !GetAtt rDestBucketName.Arn
+          S3Config:
+              BucketAccessRoleArn: !GetAtt rDestRole.Arn
+          # S3StorageClass: String
+          # Subdirectory: String
+          # Tags:
+            # - Tag
+
+    # --- DataSync Task
+    rDataSyncCWLLogGroup2:
+        Type: AWS::Logs::LogGroup
+        Properties:
+          LogGroupName: !Sub /rasp/datasync/${pDestBucketName}-1
+          RetentionInDays: !Ref pRetention
+
+    rDataSyncTask1:
+        Type: AWS::DataSync::Task
+        Properties:
+          CloudWatchLogGroupArn: !GetAtt rDataSyncCWLLogGroup2.Arn
+          SourceLocationArn: !Ref rSourceDataSyncLocationS3
+          DestinationLocationArn: !Ref rDestDataSyncLocationS3
+          Name: !Sub ${pDestBucketName}-1
+          # Options:
+          #   LogLevel: TRANSFER
+          #   TransferMode: CHANGED
+          #   OverwriteMode: ALWAYS
+          # Excludes:
+          #   - FilterRule
+          # Includes:
+          #   - FilterRule
+          # Schedule:
+          #   TaskSchedule
+
+    # Use "aws logs describe-resource-policies" to verify CW Logs Resource Policies
+    # Uncomment to create CW Logs Resource Policy for DataSync
+    rLogGroupResourcePolicy2:
+        Type: AWS::Logs::ResourcePolicy
+        Properties:
+          PolicyName: EnableDataSyncLogs2
+          PolicyDocument: !Sub |
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Sid": "AllowDataSync",
+                        "Effect": "Allow",
+                        "Action": [
+                            "logs:PutLogEvents",
+                            "logs:CreateLogStream"
+                        ],
+                        "Principal": {
+                            "Service": "datasync.${AWS::URLSuffix}"
+                        },
+                        "Condition": {
+                            "ArnLike": {
+                                "aws:SourceArn": ["arn:${AWS::Partition}:datasync:${AWS::Region}:${AWS::AccountId}:task/*"]
+                            },
+                            "StringEquals": {
+                                "aws:SourceAccount": "${AWS::AccountId}"
+                            }
+                        },
+                        "Resource": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*:*"
+                    }
+                ]
+            }
+
+# --- Source Bucket Policy
+# Update DEST-ACCOUNT-ID, SOURCE-BUCKET-NAME, uncomment, apply to Source Bucket
+# datasync-source-s3-bucketpolicy.json
+# {
+#     "Version": "2012-10-17",
+#     "Statement": [
+#         {
+#             "Sid": "BucketPolicyForDataSync",
+#             "Effect": "Allow",
+#             "Principal": {
+#                 "AWS": ["arn:aws-us-gov:iam::608763096427:root"]
+#             },
+#             "Action": [
+#                 "s3:GetBucketLocation",
+#                 "s3:ListBucket",
+#                 "s3:ListBucketMultipartUploads",
+#                 "s3:GetObject",
+#                 "s3:ListMultipartUploadParts",
+#                 "s3:GetObjectTagging"
+#             ],
+#             "Resource": [
+#                 "arn:aws-us-gov:s3:::data-source-3",
+#                 "arn:aws-us-gov:s3:::data-source-3/*"
+#             ]
+#         }
+#     ]
+# }
+
