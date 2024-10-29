@@ -1,0 +1,15 @@
+# Extract and configure
+tar -xzvf openssh-9.8.tar.gz
+cd openssh-9.8
+./configure --prefix=/usr/local/ssh
+
+# Build and install
+make
+sudo make install
+
+# Update SSH configuration (optional)
+sudo vim /etc/ssh/sshd_config
+# Adjust settings like port number, authentication methods, and logging
+
+# Restart SSH service
+sudo systemctl restart sshd
