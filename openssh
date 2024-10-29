@@ -1,3 +1,10 @@
+# Install necessary development tools and libraries
+sudo yum groupinstall "Development Tools"
+sudo yum install pam-devel libselinux-devel
+
+# Download the OpenSSH source code
+wget https://openssh.com/pub/OpenSSH/9.8/openssh-9.8.tar.gz
+
 # Extract and configure
 tar -xzvf openssh-9.8.tar.gz
 cd openssh-9.8
